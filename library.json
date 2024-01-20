@@ -1,0 +1,23 @@
+{
+  "name": "EasyRTSPServer",
+  "keywords": "rtsp,ESP32,CAM",
+  "description": "An easy-to-use RTSP Server library deployed on ESP32 based on Arduino frameworks. Support for multiple clients, RTSP OVER TCP and UDP. Now it is only for OV2640 senser. But it is easy to adapt to other sensors.",
+  "authors":
+  [
+    {
+      "name": "Chuan Liu",
+      "email": "liuchuanstudy@outlook.com",
+      "maintainer": true
+    }
+  ],
+  "repository":
+  {
+    "type": "git",
+    "url": ""
+  },
+  "version": "1.0.0",
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "*",
+  "headers": "EasyRTSPServer.h,OV2640.h,jpeg.h"
+}

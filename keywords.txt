@@ -1,0 +1,37 @@
+#######################################
+# Syntax Coloring Map GNSS
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+EasyRTSPServer	KEYWORD1
+OV2640	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+setStreamSuffix	KEYWORD2
+setFrameRate	KEYWORD2
+setAuthAccount	KEYWORD2
+init	KEYWORD2
+run	KEYWORD2
+
+done KEYWORD2
+run	KEYWORD2
+getSize	KEYWORD2
+getfb	KEYWORD2
+getWidth	KEYWORD2
+getHeight	KEYWORD2
+getFrameSize	KEYWORD2
+getPixelFormat	KEYWORD2
+setFrameSize	KEYWORD2
+setPixelFormat	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+esp32cam_config	LITERAL1
+esp32cam_aithinker_config	LITERAL1
+esp32cam_ttgo_t_config	LITERAL1
