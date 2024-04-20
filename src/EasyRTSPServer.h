@@ -65,7 +65,18 @@ struct StreamInfo {
   int m_height;
 };
 
-
+class RTPPacket {
+public:
+  char *getRtpBufHead() { return m_rtpBuf; }
+  int packRtpPack(unsigned const char* jpeg, uint32_t jpegLen, int fragmentOffset, BufPtr quant0tbl, BufPtr quant1tbl, StreamInfo* streamInfo);
+  void setRtpHeader(uint32_t seq, uint32_t timestamp);
+  bool isLastFragment() { return m_isLastFragment; }
+  int getRtpPacketSize() { return m_RtpPacketSize; }
+private:
+  char m_rtpBuf[1536];
+  bool m_isLastFragment;
+  int m_RtpPacketSize;
+};
 
 class RTSPSession {
 public:
@@ -78,7 +89,7 @@ public:
     return m_status;
   }
   void run();
-  void streamFrame(unsigned const char* data, uint32_t dataLen, uint32_t curMsec);
+  void streamRTP(RTPPacket* rtpPcaket, uint32_t curMsec);
 
 private:
   WiFiClient* m_tcpClient;
@@ -109,8 +120,6 @@ private:
   uint32_t m_Timestamp = 0;
   uint32_t m_SendIdx = 0;
 
-  char RtpBuf[1536];  // Note: we assume single threaded, this large buf we keep off of the tiny stack
-
   bool checkURL(char* aRequest);
   bool parseCSeq(char* aRequest, unsigned& seq);
   bool ParseOptionRequest(char* aRequest);
@@ -127,7 +136,7 @@ private:
   void Handle_RtspSETUP(WiFiClient* client);
   void Handle_RtspDESCRIBE(WiFiClient* client);
   void Handle_RtspOPTION(WiFiClient* client);
-  int SendRtpPacket(unsigned const char* jpeg, int jpegLen, int fragmentOffset, BufPtr quant0tbl, BufPtr quant1tbl);
+  int SendRtpPacket(RTPPacket* rtpPcaket);
 };
 
 class EasyRTSPServer {
@@ -146,6 +155,7 @@ private:
   StreamInfo m_streamInfo;
   OV2640* m_cam;
   WiFiServer m_tcpServer;
+  RTPPacket m_rtpPacket;
   uint32_t m_frameRate;
   uint32_t m_msecPerFrame;
   RTSPSession* m_session[MAX_CLIENTS_NUM] = { NULL };

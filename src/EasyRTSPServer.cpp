@@ -8,6 +8,86 @@ char const* DateHeader() {
   return buf;
 }
 
+void RTPPacket::setRtpHeader(uint32_t seq, uint32_t timestamp) {
+  m_rtpBuf[7] = seq & 0x0FF;               // each packet is counted with a sequence counter
+  m_rtpBuf[6] = seq >> 8;
+  
+  m_rtpBuf[8] = (timestamp & 0xFF000000) >> 24;  // each image gets a timestamp
+  m_rtpBuf[9] = (timestamp & 0x00FF0000) >> 16;
+  m_rtpBuf[10] = (timestamp & 0x0000FF00) >> 8;
+  m_rtpBuf[11] = (timestamp & 0x000000FF);
+}
+
+int RTPPacket::packRtpPack(unsigned const char* jpeg, uint32_t jpegLen, int fragmentOffset, BufPtr quant0tbl, BufPtr quant1tbl, StreamInfo* streamInfo) {
+  int fragmentLen = MAX_FRAGMENT_SIZE;
+  if (fragmentLen + fragmentOffset > jpegLen)  // Shrink last fragment if needed
+    fragmentLen = jpegLen - fragmentOffset;
+
+  m_isLastFragment = (fragmentOffset + fragmentLen) == jpegLen;
+
+  // Do we have custom quant tables? If so include them per RFC
+
+  bool includeQuantTbl = quant0tbl && quant1tbl && fragmentOffset == 0;
+  uint8_t q = includeQuantTbl ? 128 : 0x5e;
+
+  m_RtpPacketSize = fragmentLen + KRtpHeaderSize + KJpegHeaderSize + (includeQuantTbl ? (4 + 64 * 2) : 0);
+
+  memset(m_rtpBuf, 0x00, sizeof(m_rtpBuf));
+  // Prepare the first 4 byte of the packet. This is the Rtp over Rtsp header in case of TCP based transport
+  m_rtpBuf[0] = '$';  // magic number
+  m_rtpBuf[1] = 0;    // number of multiplexed subchannel on RTPS connection - here the RTP channel
+  m_rtpBuf[2] = (m_RtpPacketSize & 0x0000FF00) >> 8;
+  m_rtpBuf[3] = (m_RtpPacketSize & 0x000000FF);
+  // Prepare the 12 byte RTP header
+  m_rtpBuf[4] = 0x80;                                   // RTP version
+  m_rtpBuf[5] = 0x1a | (m_isLastFragment ? 0x80 : 0x00);  // JPEG payload (26) and marker bit
+  m_rtpBuf[12] = 0x13;  // 4 byte SSRC (sychronization source identifier)
+  m_rtpBuf[13] = 0xf9;  // we just an arbitrary number here to keep it simple
+  m_rtpBuf[14] = 0x7e;
+  m_rtpBuf[15] = 0x67;
+
+  // Prepare the 8 byte payload JPEG header
+  m_rtpBuf[16] = 0x00;                                 // type specific
+  m_rtpBuf[17] = (fragmentOffset & 0x00FF0000) >> 16;  // 3 byte fragmentation offset for fragmented images
+  m_rtpBuf[18] = (fragmentOffset & 0x0000FF00) >> 8;
+  m_rtpBuf[19] = (fragmentOffset & 0x000000FF);
+
+  /*    These sampling factors indicate that the chrominance components of
+       type 0 video is downsampled horizontally by 2 (often called 4:2:2)
+       while the chrominance components of type 1 video are downsampled both
+       horizontally and vertically by 2 (often called 4:2:0). */
+  m_rtpBuf[20] = 0x00;                        // type (fixme might be wrong for camera data) https://tools.ietf.org/html/rfc2435
+  m_rtpBuf[21] = q;                           // quality scale factor was 0x5e
+  m_rtpBuf[22] = streamInfo->m_width / 8;   // width  / 8
+  m_rtpBuf[23] = streamInfo->m_height / 8;  // height / 8
+
+  int headerLen = 24;     // Inlcuding jpeg header but not qant table header
+  if (includeQuantTbl) {  // we need a quant header - but only in first packet of the frame
+    //if ( debug ) printf("inserting quanttbl\n");
+    m_rtpBuf[24] = 0;  // MBZ
+    m_rtpBuf[25] = 0;  // 8 bit precision
+    m_rtpBuf[26] = 0;  // MSB of lentgh
+
+    int numQantBytes = 64;          // Two 64 byte tables
+    m_rtpBuf[27] = 2 * numQantBytes;  // LSB of length
+
+    headerLen += 4;
+
+    memcpy(m_rtpBuf + headerLen, quant0tbl, numQantBytes);
+    headerLen += numQantBytes;
+
+    memcpy(m_rtpBuf + headerLen, quant1tbl, numQantBytes);
+    headerLen += numQantBytes;
+  }
+  // if ( debug ) printf("Sending timestamp %d, seq %d, fragoff %d, fraglen %d, jpegLen %d\n", m_Timestamp, m_SequenceNumber, fragmentOffset, fragmentLen, jpegLen);
+
+  // append the JPEG scan data to the RTP buffer
+  memcpy(m_rtpBuf + headerLen, jpeg + fragmentOffset, fragmentLen);
+  fragmentOffset += fragmentLen;
+
+  return m_isLastFragment ? 0 : fragmentOffset;
+}
+
 RTSPSession::RTSPSession(WiFiClient* client, StreamInfo* streamInfo) {
   m_tcpClient = client;
   m_streamInfo = streamInfo;
@@ -376,120 +456,38 @@ RTSP_CMD_TYPES RTSPSession::Handle_RtspRequest(char* aRequest, WiFiClient* clien
   return m_RtspCmdType;
 }
 
-int RTSPSession::SendRtpPacket(unsigned const char* jpeg, int jpegLen, int fragmentOffset, BufPtr quant0tbl, BufPtr quant1tbl) {
-  // if ( debug ) printf("CStreamer::SendRtpPacket offset:%d - begin\n", fragmentOffset);
-
-  int fragmentLen = MAX_FRAGMENT_SIZE;
-  if (fragmentLen + fragmentOffset > jpegLen)  // Shrink last fragment if needed
-    fragmentLen = jpegLen - fragmentOffset;
-
-  bool isLastFragment = (fragmentOffset + fragmentLen) == jpegLen;
-
-  // Do we have custom quant tables? If so include them per RFC
-
-  bool includeQuantTbl = quant0tbl && quant1tbl && fragmentOffset == 0;
-  uint8_t q = includeQuantTbl ? 128 : 0x5e;
-
-  int RtpPacketSize = fragmentLen + KRtpHeaderSize + KJpegHeaderSize + (includeQuantTbl ? (4 + 64 * 2) : 0);
-
-  memset(RtpBuf, 0x00, sizeof(RtpBuf));
-  // Prepare the first 4 byte of the packet. This is the Rtp over Rtsp header in case of TCP based transport
-  RtpBuf[0] = '$';  // magic number
-  RtpBuf[1] = 0;    // number of multiplexed subchannel on RTPS connection - here the RTP channel
-  RtpBuf[2] = (RtpPacketSize & 0x0000FF00) >> 8;
-  RtpBuf[3] = (RtpPacketSize & 0x000000FF);
-  // Prepare the 12 byte RTP header
-  RtpBuf[4] = 0x80;                                   // RTP version
-  RtpBuf[5] = 0x1a | (isLastFragment ? 0x80 : 0x00);  // JPEG payload (26) and marker bit
-  RtpBuf[7] = m_SequenceNumber & 0x0FF;               // each packet is counted with a sequence counter
-  RtpBuf[6] = m_SequenceNumber >> 8;
-  RtpBuf[8] = (m_Timestamp & 0xFF000000) >> 24;  // each image gets a timestamp
-  RtpBuf[9] = (m_Timestamp & 0x00FF0000) >> 16;
-  RtpBuf[10] = (m_Timestamp & 0x0000FF00) >> 8;
-  RtpBuf[11] = (m_Timestamp & 0x000000FF);
-  RtpBuf[12] = 0x13;  // 4 byte SSRC (sychronization source identifier)
-  RtpBuf[13] = 0xf9;  // we just an arbitrary number here to keep it simple
-  RtpBuf[14] = 0x7e;
-  RtpBuf[15] = 0x67;
-
-  // Prepare the 8 byte payload JPEG header
-  RtpBuf[16] = 0x00;                                 // type specific
-  RtpBuf[17] = (fragmentOffset & 0x00FF0000) >> 16;  // 3 byte fragmentation offset for fragmented images
-  RtpBuf[18] = (fragmentOffset & 0x0000FF00) >> 8;
-  RtpBuf[19] = (fragmentOffset & 0x000000FF);
-
-  /*    These sampling factors indicate that the chrominance components of
-       type 0 video is downsampled horizontally by 2 (often called 4:2:2)
-       while the chrominance components of type 1 video are downsampled both
-       horizontally and vertically by 2 (often called 4:2:0). */
-  RtpBuf[20] = 0x00;                        // type (fixme might be wrong for camera data) https://tools.ietf.org/html/rfc2435
-  RtpBuf[21] = q;                           // quality scale factor was 0x5e
-  RtpBuf[22] = m_streamInfo->m_width / 8;   // width  / 8
-  RtpBuf[23] = m_streamInfo->m_height / 8;  // height / 8
-
-  int headerLen = 24;     // Inlcuding jpeg header but not qant table header
-  if (includeQuantTbl) {  // we need a quant header - but only in first packet of the frame
-    //if ( debug ) printf("inserting quanttbl\n");
-    RtpBuf[24] = 0;  // MBZ
-    RtpBuf[25] = 0;  // 8 bit precision
-    RtpBuf[26] = 0;  // MSB of lentgh
-
-    int numQantBytes = 64;          // Two 64 byte tables
-    RtpBuf[27] = 2 * numQantBytes;  // LSB of length
-
-    headerLen += 4;
-
-    memcpy(RtpBuf + headerLen, quant0tbl, numQantBytes);
-    headerLen += numQantBytes;
-
-    memcpy(RtpBuf + headerLen, quant1tbl, numQantBytes);
-    headerLen += numQantBytes;
-  }
-  // if ( debug ) printf("Sending timestamp %d, seq %d, fragoff %d, fraglen %d, jpegLen %d\n", m_Timestamp, m_SequenceNumber, fragmentOffset, fragmentLen, jpegLen);
-
-  // append the JPEG scan data to the RTP buffer
-  memcpy(RtpBuf + headerLen, jpeg + fragmentOffset, fragmentLen);
-  fragmentOffset += fragmentLen;
-
-  m_SequenceNumber++;  // prepare the packet counter for the next packet
-
+int RTSPSession::SendRtpPacket(RTPPacket* rtpPcaket) {
+  char* rtpBuf = rtpPcaket->getRtpBufHead();
+  int rtpButLen = rtpPcaket->getRtpPacketSize();
+  int sendlen = 0;
   if (m_TcpTransport) {
-    m_tcpClient->write(RtpBuf, RtpPacketSize + 4);
+    sendlen = m_tcpClient->write(rtpBuf, rtpButLen + 4);
   } else {
     m_rtpSocket.beginPacket(m_clientIPAddr, m_RtpClientPort);
-    m_rtpSocket.write((const unsigned char*)&RtpBuf[4], RtpPacketSize);
+    sendlen = m_rtpSocket.write((const unsigned char*)&rtpBuf[4], rtpButLen);
     m_rtpSocket.endPacket();
   }
-
-  // if ( debug ) printf("CStreamer::SendRtpPacket offset:%d - end\n", fragmentOffset);
-  return isLastFragment ? 0 : fragmentOffset;
+  return sendlen;
 }
 
-void RTSPSession::streamFrame(unsigned const char* data, uint32_t dataLen, uint32_t curMsec) {
-  if (m_prevMsec == 0)  // first frame init our timestamp
-    m_prevMsec = curMsec;
+void RTSPSession::streamRTP(RTPPacket* rtpPcaket, uint32_t curMsec) {
 
-  // compute deltat (being careful to handle clock rollover with a little lie)
-  uint32_t deltams = (curMsec >= m_prevMsec) ? curMsec - m_prevMsec : 100;
-  m_prevMsec = curMsec;
+  //Serial.printf("curMsec = %d, m_prevMsec = %d\n", curMsec, m_prevMsec);
 
-  // locate quant tables if possible
-  BufPtr qtable0, qtable1;
+  rtpPcaket->setRtpHeader(m_SequenceNumber, m_Timestamp);
+  
+  SendRtpPacket(rtpPcaket);
 
-  if (!decodeJPEGfile(&data, &dataLen, &qtable0, &qtable1)) {
-    Serial.printf("can't decode jpeg data\n");
-    return;
-  }
-
-  int offset = 0;
-  do {
-    offset = SendRtpPacket(data, dataLen, offset, qtable0, qtable1);
-  } while (offset != 0);
-
+  m_SequenceNumber++;
   // Increment ONLY after a full frame
-  uint32_t units = 90000;                   // Hz per RFC 2435
-  m_Timestamp += (units * deltams / 1000);  // fixed timestamp increment for a frame rate of 25fps
-
+  //Serial.printf("deltams = %d, m_Timestamp = %d\n", deltams, m_Timestamp);
+  if (rtpPcaket->isLastFragment()) {
+    // compute deltat (being careful to handle clock rollover with a little lie)
+    uint32_t deltams = (curMsec >= m_prevMsec) ? curMsec - m_prevMsec : 100;
+    m_prevMsec = curMsec;
+    m_Timestamp += (90000 * deltams / 1000);  // fixed timestamp increment for a frame rate of 25fps
+  }
+  
   m_SendIdx++;
   if (m_SendIdx > 1)
     m_SendIdx = 0;
@@ -619,14 +617,26 @@ void EasyRTSPServer::run() {
     if (now > lastimage + m_msecPerFrame || now < lastimage) {  // handle clock rollover
       m_cam->run();                                             // queue up a read for next time
       BufPtr bytes = m_cam->getfb();
-      int frameSize = m_cam->getSize();
+      uint32_t frameSize = m_cam->getSize();
       lastimage = now;
 
-      for (i = 0; i < MAX_CLIENTS_NUM; i++) {
-        if (m_session[i] && m_session[i]->Status() == SessionStatus::STATUS_STREAMING) {
-          m_session[i]->streamFrame(bytes, frameSize, now);
+      // locate quant tables if possible
+      BufPtr qtable0 = NULL;
+      BufPtr qtable1 = NULL;
+
+      // if (!decodeJPEGfile(&bytes, &frameSize, &qtable0, &qtable1)) {
+      //   Serial.printf("can't decode jpeg data\n");
+      //   return;
+      // }
+      int offset = 0;
+      do {
+        offset = m_rtpPacket.packRtpPack(bytes, frameSize, offset, qtable0, qtable1, &m_streamInfo);
+        for (i = 0; i < MAX_CLIENTS_NUM; i++) {
+          if (m_session[i] && m_session[i]->Status() == SessionStatus::STATUS_STREAMING) {
+            m_session[i]->streamRTP(&m_rtpPacket, now);
+          }
         }
-      }
+      } while (offset != 0);
 
       m_cam->done();
 
